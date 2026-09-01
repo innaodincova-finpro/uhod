@@ -1788,14 +1788,45 @@ function openProduct(id){
 var KEY = "tochka_uhoda_v1";
 var ANKETA_URL_DEFAULT = "https://claude.ai/code/artifact/d7c4fc66-d2d8-42eb-9ec7-6d4dcde5fc2d";
 var CABINET_URL_DEFAULT = "https://claude.ai/code/artifact/b5d9b127-ddf4-456f-8d17-6b81a71009c6";
-var D = null, undoStack = [], redoStack = [], storageOk = true;
+var D = null, undoStack = [], redoStack = [], storageOk = true, brokenRaw = null;
+
+/* Старые копии дополняем недостающими полями, иначе кабинет спотыкается
+   на данных, сохранённых прежней редакцией. */
+function migrate(d){
+  if (!d || typeof d !== "object") return null;
+  if (!d.settings) d.settings = {};
+  var st = d.settings;
+  ["name","role","msg","contact","anketaUrl","cabinetUrl","theme"].forEach(function(k){
+    if (typeof st[k] !== "string") st[k] = (k === "msg" ? "wa" : k === "theme" ? "light" : "");
+  });
+  ["clients","tasks","links","brands","catalogCustom"].forEach(function(k){
+    if (!Array.isArray(d[k])) d[k] = [];
+  });
+  if (!d.catalogHidden || typeof d.catalogHidden !== "object") d.catalogHidden = {};
+  if (!d.catalogEdits || typeof d.catalogEdits !== "object") d.catalogEdits = {};
+  if (!d.brands.length) d.brands = [{ id:"angiopharm", name:"Ангиофарм", on:true }];
+  d.clients.forEach(function(c){
+    ["orders","consents","checks"].forEach(function(k){ if (!Array.isArray(c[k])) c[k] = []; });
+    if (typeof c.notes !== "string") c.notes = "";
+  });
+  d.v = 2;
+  return d;
+}
 
 function load(){
-  try{
-    var raw = localStorage.getItem(KEY);
-    if (raw){ D = JSON.parse(raw); }
-  }catch(e){ storageOk = false; }
-  if (!D){ D = demoData(); save(); }
+  var raw = null;
+  try{ raw = localStorage.getItem(KEY); }catch(e){ storageOk = false; }
+  if (raw){
+    try{ D = migrate(JSON.parse(raw)); }
+    catch(e){
+      /* Данные испорчены. Не затираем их: откладываем в сторону,
+         чтобы человек мог выгрузить файл и попробовать спасти. */
+      brokenRaw = raw;
+      try{ localStorage.setItem(KEY + "_broken_" + Date.now(), raw); }catch(e2){}
+      D = null;
+    }
+  }
+  if (!D){ D = demoData(); if (!brokenRaw) save(); }
   if (!D.settings.anketaUrl) D.settings.anketaUrl = ANKETA_URL_DEFAULT;
   if (!D.settings.cabinetUrl) D.settings.cabinetUrl = CABINET_URL_DEFAULT;
   autoUrls();
@@ -1883,6 +1914,18 @@ document.addEventListener("focus", function(ev){
   if (!el || !el.getAttribute || !el.getAttribute("data-phone")) return;
   if (!el.value) el.value = "+7 (";
 }, true);
+
+/* Сообщение о повреждённых данных: молча терять записи нельзя. */
+function brokenNote(){
+  if (!brokenRaw) return "";
+  return '<div class="warnbox"><b>Прежние записи не читаются.</b> ' +
+    'Файл данных в этом браузере повреждён — кабинет открылся пустым, но старое не стёрто. ' +
+    'Сохраните его файлом и пришлите мне, либо загрузите свою резервную копию.' +
+    '<div class="rowbtns" style="margin-top:10px">' +
+      '<button type="button" class="b b-alt b-sm" data-act="broken-save">Сохранить повреждённые данные</button>' +
+      '<button type="button" class="b b-alt b-sm" data-act="import">Загрузить копию</button>' +
+    '</div></div>';
+}
 
 function daysBetween(a, b){ return Math.round((new Date(b) - new Date(a)) / 86400000); }
 /* «ждёт 5 дней» — чтобы старые анкеты не терялись в списке */
@@ -2136,7 +2179,12 @@ function parseCode(code){
   code = code.replace(/^\s*|\s*$/g, "");
   try{
     var o = JSON.parse(b64d(code));
-    if (!o || (!o.a && !o.r)) return null;
+    if (!o || typeof o !== "object") return null;
+    if (!o.a && !o.r) return null;
+    if (o.a && typeof o.a !== "object") return null;
+    if (o.r && typeof o.r !== "object") return null;
+    if (o.c != null && typeof o.c !== "string") return null;
+    if (o.d != null && !/^\d{4}-\d{2}-\d{2}$/.test(o.d)) o.d = today();
     return o;
   }catch(e){ return null; }
 }
@@ -2265,7 +2313,7 @@ function viewToday(){
   }
 
   return '<h1>Сегодня</h1><div class="sub">' + ruDate(t) + ' · ' + (due.length ? due.length + " дел" : "дел нет") + '</div>' +
-  iconHint() + backupNote() +
+  brokenNote() + iconHint() + backupNote() +
   '<div class="today"><div>' + line +
     (newAnk.length ? '<div class="card" style="margin-top:16px"><h2>Новые анкеты без схемы</h2><div class="list">' +
       newAnk.map(function(c){
@@ -2729,6 +2777,14 @@ document.addEventListener("click", function(ev){
     });
     toast("Адреса сохранены"); return render();
   }
+  if (act === "broken-save"){
+    var bb = new Blob([brokenRaw || ""], { type:"application/json" });
+    var ba = document.createElement("a");
+    ba.href = URL.createObjectURL(bb);
+    ba.download = "tochka-uhoda-ПОВРЕЖДЕНО-" + today() + ".json";
+    document.body.appendChild(ba); ba.click(); document.body.removeChild(ba);
+    toast("Файл сохранён"); return;
+  }
   if (act === "export"){
     var blob = new Blob([JSON.stringify(D, null, 1)], { type:"application/json" });
     var a = document.createElement("a");
@@ -2745,7 +2801,7 @@ document.addEventListener("click", function(ev){
       var f = inp.files[0]; if (!f) return;
       var r = new FileReader();
       r.onload = function(){
-        try{ var o = JSON.parse(r.result); if (!o.clients) throw 0; change(function(){ D = o }); render(); toast("Копия загружена"); }
+        try{ var o = migrate(JSON.parse(r.result)); if (!o || !Array.isArray(o.clients)) throw 0; change(function(){ D = o; brokenRaw = null; }); render(); toast("Копия загружена"); }
         catch(e){ toast("Файл не подошёл"); }
       };
       r.readAsText(f);
@@ -2892,7 +2948,7 @@ render();
   }
 
   /* Экран клиента: анкета открывается в рамке телефона прямо здесь */
-  var wrap = null;
+  var wrap = null, frameWin = null;
   document.addEventListener("click", function(ev){
     if (!ev.target.closest("#btnClientView")) return;
     openClientView();
@@ -2914,12 +2970,16 @@ render();
     document.body.appendChild(wrap);
     var f = wrap.querySelector("#demoFrame");
     f.setAttribute("srcdoc", src);
+    frameWin = f.contentWindow;
     wrap.querySelector("#demoX").onclick = close;
     wrap.addEventListener("click", function(ev){ if (ev.target === wrap) close(); });
   }
   function close(){ if (wrap){ wrap.remove(); wrap = null; } }
 
   window.addEventListener("message", function(ev){
+    /* Принимаем ответы только от своей же рамки с анкетой. Постороннее окно,
+       встроившее кабинет к себе, подсунуть запись не сможет. */
+    if (!frameWin || ev.source !== frameWin) return;
     var d = ev.data;
     if (!d || !d.tuAnketa) return;
     var o = parseCode(d.tuAnketa);
@@ -2933,7 +2993,7 @@ render();
     if (name === null || !name) return;
     o.c = name;
     var cl = acceptAnketa(o, name);
-    close();
+    close(); frameWin = null;
     if (cl){ go("clients", cl.id); toast("Анкета принята и записана в реестр"); }
   });
 })();
